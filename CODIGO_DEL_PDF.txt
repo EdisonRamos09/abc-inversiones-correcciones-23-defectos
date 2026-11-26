@@ -1,0 +1,182 @@
+Aquí está el código de las correcciones de los 23 defectos. No pude leer los repositorios,
+así que son implementaciones de referencia. Ajusta los nombres (AppError, db, tablas
+de Drizzle, componentes) a los reales y confirma cada una repitiendo la prueba
+indicada.
+Backend (abc_inversiones_api)
+DEF-01: OCR tumba el servidor (CP-I62, CP-S32, CP-A12)
+// módulo de vouchers, servicio de OCR
+if (!env.OCR_ENABLED) throw new AppError(503, "El análisis automático no está disponible");
+try {
+  const [result] = await visionClient.textDetection({ image: { content: buffer } });
+  return extractVoucherDataFromText(result.fullTextAnnotation?.text ?? "");
+} catch (error) {
+  logger.error({ err: error }, "OCR no disponible"); // incluye NO_ADC_FOUND
+  throw new AppError(503, "El análisis automático no está disponible. Complete los datos a mano.");
+}
+DEF-03 y DEF-04: rechazo y aprobación (CP-I25, CP-I23)
+// approve: primero permiso (403), después estado (400)
+if (user.role === "client") throw new AppError(403, "No tienes permiso para aprobar préstamos");
+// reject
+const REJECTABLE = ["draft", "pending_investor_review", "pending_admin_review"];
+if (!REJECTABLE.includes(loan.status)) {
+  throw new AppError(400, "El préstamo ya no puede rechazarse");
+}
+DEF-05: préstamo eliminado expone transacciones (CP-I26)
+const [loan] = await db.select().from(loans)
+  .where(and(eq(loans.id, id), isNull(loans.deletedAt)));
+if (!loan) throw new AppError(404, "Préstamo no encontrado");
+DEF-06: el resumen del cliente suma rechazados (CP-I27)
+.where(and(
+  eq(loans.clientId, clientId),
+  isNull(loans.deletedAt),
+  notInArray(loans.status, ["rejected", "deleted"]),
+))
+DEF-07: el resumen del inversionista omite cobros (CP-I28)
+const [{ collected }] = await db
+  .select({ collected: sql<string>`coalesce(sum(${payments.amount}), 0)` })
+  .from(payments)
+  .innerJoin(loans, eq(payments.loanId, loans.id))
+  .where(and(
+    eq(loans.investorId, investorId),
+    eq(payments.status, "confirmed"),
+    isNull(payments.deletedAt),
+  ));
+DEF-08: límite de intentos desactivado (CP-I40)
+// rate-limit.middleware.ts
+// DEF-08: solo se desactiva en pruebas, por variable de entorno.
+const RATE_LIMIT_DISABLED =
+  process.env.NODE_ENV === "test" && process.env.RATE_LIMIT_DISABLED === "true";
+CP-I40 debe ejecutarse con el límite activo.
+DEF-09: autoeliminación del administrador (CP-I54)
+if (req.params.id === req.user.id) {
+  throw new AppError(403, "No puedes eliminar tu propia cuenta");
+}
+DEF-10: usuario reactivado no aparece (CP-I53)
+await db.update(users)
+  .set({ active: true, deletedAt: null, updatedAt: new Date() })
+  .where(eq(users.id, id));
+DEF-11: UUID inválido responde 500 (CP-I52)
+const { id } = z.object({ id: z.string().uuid() }).parse(req.params);
+// 400 si falla
+DEF-12: correo duplicado responde 400 (CP-I11)
+const { error } = await supabaseAdmin.auth.admin.createUser({ email, password });
+if (error) {
+  if (error.code === "email_exists" || /already (been )?registered/i.test(error.message)) {
+    throw new AppError(409, "Ya existe un usuario con ese correo");
+  }
+  throw new AppError(400, error.message);
+}
+DEF-13: montos infinitos y fechas con desfase (CP-U53, CP-U54, CP-U56)
+const moneyAmount = z.coerce.number().finite().positive(); // rechaza Infinity y NaN
+const isoDateWithOffset = z.string().datetime({ offset: true }); // acepta ...-05:00
+DEF-14: lector de vouchers (CP-U35, CP-U37 a CP-U40)
+// banco: quitar tildes antes de comparar
+const normalized = text.normalize("NFD").replace(/[\u0300-\u036f]/g, "").toUpperCase();
+if (/BANCO DE CREDITO|\bBCP\b/.test(normalized)) bank = "BCP";
+if (/\bBANBIF\b/.test(normalized)) bank = "BANBIF";
+// operación: capturar como texto para conservar ceros a la izquierda
+const op = normalized.match(/OPERACION\D{0,12}(\d{6,})/)?.[1] ?? null;
+// monto: "S/ 1,000" -> "1000.00"; "1 234,56" -> "1234.56"
+function parseAmount(raw: string): string {
+  const clean = raw.replace(/[^\d.,]/g, "");
+  const thousands = /^\d{1,3}(,\d{3})+(\.\d{1,2})?$/.test(clean);
+  const value = thousands ? clean.replace(/,/g, "") : clean.replace(",", ".");
+  return Number(value).toFixed(2);
+}
+// fecha: 31/02/2026 no existe
+function isRealDate(y: number, m: number, d: number): boolean {
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
+}
+DEF-16 (backend): campos del voucher en snake_case
+const toCamel = (row: Record<string, unknown>) =>
+  Object.fromEntries(
+    Object.entries(row).map(([k, v]) => [k.replace(/_([a-z])/g, (_, c) => c.toUpperCase()), v]),
+  );
+const vouchers = rows.map(toCamel); // reemplaza row_to_json(v) sin mapear
+DEF-20 (backend): señal clara de cuenta inactiva
+if (!user.active) {
+  throw new AppError(403, "Cuenta desactivada", { code: "ACCOUNT_INACTIVE" });
+}
+DEF-23 (backend): ESLint
+// loans.controller.ts:144-145 — reemplazar any
+type LoanRow = typeof loans.$inferSelect;
+const mapLoan = (row: LoanRow) => ({ /* ... */ });
+// users.controller.ts:148 — eliminar movePendingInvestorVouchersToAdminReview si no se usa,
+// o llamarla donde corresponda.
+Frontend (abc_inversiones_app)
+DEF-02: inversionista ve Aprobar en pending_admin_review (CP-U89, CP-S21)
+// loan-permissions.ts
+export function canReviewLoan(user: User, loan: Loan): boolean {
+  if (user.role === "admin" || user.isOwner) return loan.status === "pending_admin_review";
+  if (user.role === "investor") {
+    return loan.status === "pending_investor_review" && loan.investorId === user.id;
+  }
+  return false;
+}
+Ajusta el caso del administrador si en tu flujo también revisa en pending_investor_review.
+DEF-15: avatar con URL blob: (CP-S38)
+// ProfileEditDrawer.tsx
+const updated = await updateAvatar(file);
+setUser({ ...user, avatarUrl: updated.avatarUrl }); // URL definitiva del servidor
+URL.revokeObjectURL(previewUrl);
+En ProfilePage.tsx:152, la condición hasProfileDetails no debe impedir el refetch de /users/me.
+DEF-16 (frontend): Editar y Eliminar para el cliente (CP-S31)
+{canEditVoucher(user, voucher) && <Button onClick={onEdit}>Editar</Button>}
+{canDeleteVoucher(user, voucher) && (
+  <Button variant="destructive" onClick={onDelete}>Eliminar</Button>
+)}
+DEF-17: aviso «Vouchers por revisar» (CP-S40)
+const toReview = vouchers.filter((v) => v.status === "pending_investor_review");
+{user.role === "investor" && toReview.length > 0 && (
+  <Alert>
+    Vouchers por revisar: {toReview.length}
+    <Button onClick={() => openReview(toReview[0])}>Revisar</Button>
+  </Alert>
+)}
+DEF-18: bandeja de administración (CP-S41)
+const queue = vouchers.filter((v) => v.status === "pending_admin_review");
+DEF-19: «En mora» fijo en 0 (CP-S43)
+const overdueCount = loans.filter(
+  (l) => l.status === "defaulted" || l.installments?.some((i) => i.status === "overdue"),
+).length;
+// <Metric label="En mora" value={overdueCount} />
+DEF-20 (frontend): mensaje de cuenta desactivada (CP-S04)
+const message =
+  error?.code === "ACCOUNT_INACTIVE"
+    ? "Tu cuenta está desactivada. Comunícate con el administrador."
+    : "No se pudo iniciar sesión. Revisa tus datos.";
+DEF-21: enrutamiento y consultas (CP-S09, CP-S10, CP-S16)
+// LoginPage
+if (isAuthenticated) return <Navigate to="/home" replace />;
+// consultas administrativas solo para roles con permiso
+useQuery({ queryKey, queryFn, enabled: user.role === "admin" || user.isOwner });
+// RequestsPage: la URL manda sobre localStorage
+const tab = searchParams.get("tab") ?? savedTab ?? "users";
+DEF-22: paginación al buscar (CP-S23)
+const handleSearch = (value: string) => {
+  setSearch(value);
+  setPage(1);
+};
+// repetir setPage(1) al cambiar filtros de estado
+DEF-23 (frontend): chunk de 654 kB
+// router: carga por ruta
+const LoansPage = lazy(() => import("./pages/LoansPage"));
+const UsersPage = lazy(() => import("./pages/UsersPage"));
+// envolver las rutas en <Suspense fallback={<Spinner />}>
+// vite.config.ts
+build: {
+  rollupOptions: {
+    output: {
+      manualChunks: {
+        react: ["react", "react-dom", "react-router-dom"],
+        query: ["@tanstack/react-query"],
+      },
+    },
+  },
+},
+Verificación final: ejecuta pnpm typecheck && pnpm lint && pnpm test en la API,
+pnpm lint y vite build en el frontend, y vuelve a correr qa-tests.
+Si me pegas por aquí los archivos clave (rate-limit.middleware.ts,
+loans.controller.ts, loan-permissions.ts, LoginPage.tsx), te devuelvo cada
+corrección ajustada a tu código real.
