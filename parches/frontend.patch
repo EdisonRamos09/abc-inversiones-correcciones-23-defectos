@@ -1,0 +1,477 @@
+From 66df02ca54a5f4da6b8cc0134f15552ce299ae76 Mon Sep 17 00:00:00 2001
+From: EdisonRamos09 <112212426+EdisonRamos09@users.noreply.github.com>
+Date: Thu, 26 Nov 2026 18:56:39 -0500
+Subject: [PATCH] fix: aplicar las correcciones de calidad del informe en
+ abc_inversiones_app
+
+---
+ src/App.tsx                                   |  2 +-
+ src/components/ProfileEditDrawer.tsx          |  6 ++-
+ .../loans/components/LoanDetailPanel.tsx      | 15 ++++----
+ src/features/loans/loan-permissions.ts        |  1 +
+ src/hooks/queries/audit-queries.ts            |  2 +-
+ src/hooks/queries/users-queries.ts            |  4 +-
+ src/lib/loans-api.ts                          |  3 ++
+ src/pages/LoansPage.tsx                       | 11 ++++--
+ src/pages/LoginPage.tsx                       | 10 +++--
+ src/pages/ProfilePage.tsx                     | 16 --------
+ src/pages/UsersPage.tsx                       |  2 +-
+ src/pages/dashboard/AdminDashboard.tsx        |  2 +-
+ src/pages/dashboard/InvestorDashboard.tsx     |  2 +-
+ .../components/AdminVouchersDrawer.tsx        | 37 +++++++++----------
+ src/pages/dashboard/dashboard-queries.ts      |  1 +
+ vite.config.ts                                | 12 ++++++
+ 16 files changed, 67 insertions(+), 59 deletions(-)
+
+diff --git a/src/App.tsx b/src/App.tsx
+index d21bf40..1dbe14e 100644
+--- a/src/App.tsx
++++ b/src/App.tsx
+@@ -60,7 +60,7 @@ function ProtectedAppRoutes() {
+           <Route path="loans" element={<RouteChunk><LoansPage /></RouteChunk>} />
+           <Route path="investments" element={<RouteChunk><LoansPage /></RouteChunk>} />
+           <Route path="users" element={<RouteChunk><UsersPage /></RouteChunk>} />
+-          <Route path="requests" element={<RouteChunk><UsersPage initialTab="requests" /></RouteChunk>} />
++          <Route path="requests" element={<RouteChunk><UsersPage key="requests" initialTab="requests" /></RouteChunk>} />
+           <Route path="audit" element={<RouteChunk><AuditPage /></RouteChunk>} />
+           <Route path="profile" element={<RouteChunk><ProfilePage /></RouteChunk>} />
+           <Route path="notifications" element={<RouteChunk><NotificationsPage /></RouteChunk>} />
+diff --git a/src/components/ProfileEditDrawer.tsx b/src/components/ProfileEditDrawer.tsx
+index 87bc255..6f42fc4 100644
+--- a/src/components/ProfileEditDrawer.tsx
++++ b/src/components/ProfileEditDrawer.tsx
+@@ -173,6 +173,10 @@ export function ProfileEditDrawer({ isOpen, onClose, profileData, onSuccess }: P
+   const [maritalStatus, setMaritalStatus] = useState("none")
+   const canAddBankAccount = bankAccounts.every((account) => account.trim().length > 0)
+   const displayName = [profileData?.firstName, profileData?.lastName].filter(Boolean).join(" ").trim() || "Mi perfil"
++  useEffect(() => () => {
++    if (previewAvatarUrl) URL.revokeObjectURL(previewAvatarUrl)
++  }, [previewAvatarUrl])
++
+   const avatarInitials = (
+     displayName
+       .split(/\s+/)
+@@ -269,7 +273,7 @@ export function ProfileEditDrawer({ isOpen, onClose, profileData, onSuccess }: P
+         )
+ 
+         if (payload.success) {
+-          finalProfileData = { ...finalProfileData, avatarUrl: previewAvatarUrl || payload.data.avatarUrl }
++          finalProfileData = { ...finalProfileData, avatarUrl: payload.data.avatarUrl }
+         } else {
+           toastManager.add({
+             type: "error",
+diff --git a/src/features/loans/components/LoanDetailPanel.tsx b/src/features/loans/components/LoanDetailPanel.tsx
+index 475fb3d..cee0573 100644
+--- a/src/features/loans/components/LoanDetailPanel.tsx
++++ b/src/features/loans/components/LoanDetailPanel.tsx
+@@ -5,7 +5,7 @@ import {
+   CreditCardIcon,
+   UserIcon,
+ } from "lucide-react"
+-import { useState, type ReactNode } from "react"
++import { useRef, useState, type ReactNode } from "react"
+ 
+ const fadeIn = {
+   initial: { opacity: 0 },
+@@ -47,12 +47,12 @@ import {
+ } from "@/features/loans/loan-utils"
+ import { fetchUserById } from "@/lib/loans-api"
+ import { cn } from "@/lib/utils"
+-import type { Installment, Loan, LoanTransaction, PaginationMeta, Payment, PaymentVoucher } from "@/types/loans"
++import type { Installment, Loan, LoanTransaction, PaginationMeta, Payment } from "@/types/loans"
+ 
+ export type RelatedData = {
+   installments: Installment[]
+   payments: Payment[]
+-  vouchers: PaymentVoucher[]
++  pendingInvestorVouchers: number
+ }
+ 
+ const STATUS_ACCENT: Record<string, "success" | "warning" | "destructive" | "muted"> = {
+@@ -133,6 +133,7 @@ export function LoanDetailPanel({
+     drawerWidth,
+   })
+ 
++  const paymentsHeading = useRef<HTMLHeadingElement>(null)
+   const [showSchedule, setShowSchedule] = useState(false)
+   const [clientSheetUser, setClientSheetUser] = useState<UserDetailProfile | null>(null)
+   const [investorSheetUser, setInvestorSheetUser] = useState<UserDetailProfile | null>(null)
+@@ -163,9 +164,7 @@ export function LoanDetailPanel({
+   const canSubmitVoucher = perspective === "client" && loan.status === "active"
+   const canRegisterPayment = perspective === "admin" && paymentAllowedStatuses.has(loanStatus)
+ 
+-  const pendingVouchersCount = relatedData.vouchers.filter(
+-    (v) => v.status === "pending_investor_review" || v.status === "pending_admin_review",
+-  ).length
++  const pendingVouchersCount = relatedData.pendingInvestorVouchers
+ 
+   const visibleInstallments = getVisibleInstallments(relatedData.installments)
+ 
+@@ -223,7 +222,7 @@ export function LoanDetailPanel({
+                 <p className="text-xs text-muted-foreground">Pendientes de aprobación</p>
+               </div>
+             </div>
+-            <Button size="sm" variant="secondary" onClick={() => {}}>
++            <Button size="sm" variant="secondary" onClick={() => paymentsHeading.current?.focus()}>
+               Revisar
+             </Button>
+           </motion.div>
+@@ -317,7 +316,7 @@ export function LoanDetailPanel({
+ 
+         {/* ── Pagos y Vouchers ── */}
+         <SectionBlock animate>
+-          <h3 className="text-sm font-semibold text-foreground mb-3">Pagos</h3>
++          <h3 ref={paymentsHeading} tabIndex={-1} className="text-sm font-semibold text-foreground mb-3">Pagos</h3>
+           <PaymentsGallery
+             transactions={transactions ?? []}
+             canManage={perspective === "admin"}
+diff --git a/src/features/loans/loan-permissions.ts b/src/features/loans/loan-permissions.ts
+index 8696275..aefff2b 100644
+--- a/src/features/loans/loan-permissions.ts
++++ b/src/features/loans/loan-permissions.ts
+@@ -61,6 +61,7 @@ export function canReviewLoan(loan: Loan | null, user: AuthUser) {
+   if (isAdminUser(user)) return true;
+   return (
+     user?.role === "investor" &&
++    loan.status === "pending_investor_review" &&
+     Boolean(loan.investorId) &&
+     loan.investorId === user.id
+   );
+diff --git a/src/hooks/queries/audit-queries.ts b/src/hooks/queries/audit-queries.ts
+index 0cf4187..1ee1199 100644
+--- a/src/hooks/queries/audit-queries.ts
++++ b/src/hooks/queries/audit-queries.ts
+@@ -14,7 +14,7 @@ export function useAuditLogsQuery(params: AuditParams = {}) {
+   const scope = getAuthQueryScope(user);
+ 
+   return useQuery<AuditLogsQueryData>({
+-    enabled: Boolean(session?.access_token),
++    enabled: Boolean(session?.access_token && (user?.isOwner || user?.role === "admin")),
+     meta: { persist: true },
+     placeholderData: keepPreviousData,
+     queryFn: ({ signal }) =>
+diff --git a/src/hooks/queries/users-queries.ts b/src/hooks/queries/users-queries.ts
+index 8593573..31e56a2 100644
+--- a/src/hooks/queries/users-queries.ts
++++ b/src/hooks/queries/users-queries.ts
+@@ -32,7 +32,7 @@ export function useUsersQuery(params: UsersQueryParams = {}) {
+   const scope = getAuthQueryScope(user);
+ 
+   return useQuery<UsersQueryData>({
+-    enabled: Boolean(session?.access_token),
++    enabled: Boolean(session?.access_token && (user?.isOwner || user?.role === "admin")),
+     meta: { persist: true },
+     placeholderData: keepPreviousData,
+     queryFn: ({ signal }) =>
+@@ -56,7 +56,7 @@ export function useAccessRequestsQuery(params: AccessRequestsQueryParams = {}) {
+   const scope = getAuthQueryScope(user);
+ 
+   return useQuery<AccessRequestsQueryData>({
+-    enabled: Boolean(session?.access_token),
++    enabled: Boolean(session?.access_token && (user?.isOwner || user?.role === "admin")),
+     meta: { persist: true },
+     placeholderData: keepPreviousData,
+     queryFn: ({ signal }) =>
+diff --git a/src/lib/loans-api.ts b/src/lib/loans-api.ts
+index 4a89695..d5fc9c2 100644
+--- a/src/lib/loans-api.ts
++++ b/src/lib/loans-api.ts
+@@ -68,6 +68,7 @@ export type VoucherAnalysis = {
+ };
+ 
+ export type LoanBundle = {
++  pendingInvestorVouchers?: number;
+   installments: Installment[];
+   loan: Loan | null;
+ };
+@@ -345,12 +346,14 @@ export async function fetchLoanBundle(
+     const payload = await readApiResponse<
+       | LoanBundle
+       | {
++          pendingInvestorVouchers?: number;
+           installments?: Installment[];
+           loan?: Loan | null;
+         }
+     >(fetchWithAuth, `/api/v1/loans/${loanId}/bundle`, init);
+ 
+     return {
++      pendingInvestorVouchers: payload.data?.pendingInvestorVouchers ?? 0,
+       installments: payload.data?.installments ?? [],
+       loan: payload.data?.loan ?? null,
+     };
+diff --git a/src/pages/LoansPage.tsx b/src/pages/LoansPage.tsx
+index 8f5c5ca..d06cd57 100644
+--- a/src/pages/LoansPage.tsx
++++ b/src/pages/LoansPage.tsx
+@@ -65,7 +65,7 @@ import type {
+ const emptyRelatedData: RelatedData = {
+   installments: [],
+   payments: [],
+-  vouchers: [],
++  pendingInvestorVouchers: 0,
+ }
+ 
+ function withPaymentProgress(loan: Loan, installments: RelatedData["installments"] = []) {
+@@ -281,7 +281,7 @@ export default function LoansPage() {
+         setRelatedData({
+           installments,
+           payments: [],
+-          vouchers: [],
++          pendingInvestorVouchers: bundle.pendingInvestorVouchers ?? 0,
+         })
+         setRelatedDataLoanId(id)
+       } catch (error) {
+@@ -314,7 +314,7 @@ export default function LoansPage() {
+     setRelatedData({
+       installments: detailQuery.data.installments,
+       payments: [],
+-      vouchers: [],
++      pendingInvestorVouchers: detailQuery.data.pendingInvestorVouchers ?? 0,
+     })
+     setRelatedDataLoanId(detailLoanId)
+     setDetailError(null)
+@@ -553,7 +553,10 @@ export default function LoansPage() {
+         onOpenLoan={handleOpenLoanDetail}
+         onPageChange={setPage}
+         onStatusFilterChange={handleStatusFilterChange}
+-        onSearchQueryChange={setSearchQuery}
++        onSearchQueryChange={(query) => {
++          setSearchQuery(query)
++          setPage(1)
++        }}
+       />
+ 
+       <Drawer
+diff --git a/src/pages/LoginPage.tsx b/src/pages/LoginPage.tsx
+index 7d47af2..5af9e17 100644
+--- a/src/pages/LoginPage.tsx
++++ b/src/pages/LoginPage.tsx
+@@ -33,7 +33,7 @@ import {
+ import type { FormEvent } from "react"
+ import { useEffect, useRef, useState } from "react"
+ import { useForm, useWatch } from "react-hook-form"
+-import { useLocation, useNavigate } from "react-router-dom"
++import { Navigate, useLocation, useNavigate } from "react-router-dom"
+ import { motion } from "framer-motion"
+ import { z } from "zod"
+ 
+@@ -118,7 +118,7 @@ function getApiBaseUrl() {
+ export default function LoginPage() {
+   const navigate = useNavigate()
+   const location = useLocation()
+-  const { login } = useAuth()
++  const { login, session } = useAuth()
+ 
+   const [cardMode, setCardMode] = useState<LoginCardMode>("login")
+   const [showPassword, setShowPassword] = useState(false)
+@@ -232,7 +232,9 @@ export default function LoginPage() {
+       if (!response.ok || !payload?.success || !payload.data?.session) {
+         const status = response.status
+         const isCredentialError = status === 400 || status === 401
+-        if (isCredentialError) {
++        if (status === 403) {
++          updateVisibleAuthError(payload?.message || "Acceso restringido.")
++        } else if (isCredentialError) {
+           updateVisibleAuthError("Correo electrónico o contraseña incorrectos.")
+           setFocus("email")
+         } else {
+@@ -332,6 +334,8 @@ export default function LoginPage() {
+   const { onChange: onEmailChange, ...emailRest } = register("email")
+   const { onChange: onPasswordChange, ...passwordRest } = register("password")
+ 
++  if (session?.access_token) return <Navigate to="/home" replace />
++
+   return (
+     <ScrollArea fill className="h-dvh w-full bg-linear-to-b from-[#09152E] via-[#192541] to-[#1F2A44]">
+       <div className="flex min-h-full w-full flex-col items-center justify-center p-4 md:p-8">
+diff --git a/src/pages/ProfilePage.tsx b/src/pages/ProfilePage.tsx
+index ed8ab1c..36abc7e 100644
+--- a/src/pages/ProfilePage.tsx
++++ b/src/pages/ProfilePage.tsx
+@@ -69,13 +69,6 @@ function resolveProfileAvatarUrl(url?: string | null) {
+   return url
+ }
+ 
+-function hasProfileDetails(data: ProfileData | null | undefined) {
+-  return Boolean(
+-    data &&
+-      ("bankAccounts" in data || "dni" in data || "address" in data || "avatarUrl" in data),
+-  )
+-}
+-
+ function getName(profile?: ProfileData | null) {
+   return [profile?.firstName, profile?.lastName].filter(Boolean).join(" ").trim() || profile?.email || "Mi perfil"
+ }
+@@ -149,15 +142,6 @@ export default function ProfilePage() {
+   useEffect(() => {
+     if (!session?.access_token) return
+ 
+-    if (user?.id && hasProfileDetails(user)) {
+-      const timeoutId = window.setTimeout(() => {
+-        setProfileData(user)
+-        setLoading(false)
+-      }, 0)
+-
+-      return () => window.clearTimeout(timeoutId)
+-    }
+-
+     async function fetchProfile() {
+       try {
+         if (!API_BASE_URL) throw new Error("No se pudo conectar con el servidor.")
+diff --git a/src/pages/UsersPage.tsx b/src/pages/UsersPage.tsx
+index 8534ac2..42898f7 100644
+--- a/src/pages/UsersPage.tsx
++++ b/src/pages/UsersPage.tsx
+@@ -62,7 +62,7 @@ export default function UsersPage({ initialTab = "users" }: { initialTab?: Users
+   const queryClient = useQueryClient()
+ 
+   // ── Tab ────────────────────────────────────────────────────────────────
+-  const [activeTab, setActiveTab] = useState<UsersTab>(() => readUsersPreferences().activeTab ?? initialTab)
++  const [activeTab, setActiveTab] = useState<UsersTab>(() => initialTab === "requests" ? initialTab : readUsersPreferences().activeTab ?? initialTab)
+ 
+   // ── Users filter state (drives server-side query) ─────────────────────
+   const [page, setPage] = useState(1)
+diff --git a/src/pages/dashboard/AdminDashboard.tsx b/src/pages/dashboard/AdminDashboard.tsx
+index a3a7360..79b3a36 100644
+--- a/src/pages/dashboard/AdminDashboard.tsx
++++ b/src/pages/dashboard/AdminDashboard.tsx
+@@ -47,7 +47,7 @@ export default function AdminDashboard() {
+   const avance = totalDebtAmount > 0
+     ? Math.round((parseFloat(String(capital)) / totalDebtAmount) * 100)
+     : 0
+-  const vouchersCount = (data?.vouchers?.pendingInvestor || 0) + (data?.vouchers?.pendingAdmin || 0)
++  const vouchersCount = data?.vouchers?.pendingAdmin || 0
+ 
+   const loansActive = data?.loans?.activeLoans || 0
+   const loansMora = data?.overdue?.overdueCount || 0
+diff --git a/src/pages/dashboard/InvestorDashboard.tsx b/src/pages/dashboard/InvestorDashboard.tsx
+index 7721709..8deb470 100644
+--- a/src/pages/dashboard/InvestorDashboard.tsx
++++ b/src/pages/dashboard/InvestorDashboard.tsx
+@@ -178,7 +178,7 @@ export default function InvestorDashboard() {
+                   </div>
+                   <div className="flex justify-between text-sm">
+                     <span className="text-muted-foreground">En mora</span>
+-                    <span className="font-bold">0</span>
++                    <span className="font-bold">{summary.overdueLoans ?? 0}</span>
+                   </div>
+                 </div>
+               </CardContent>
+diff --git a/src/pages/dashboard/components/AdminVouchersDrawer.tsx b/src/pages/dashboard/components/AdminVouchersDrawer.tsx
+index cde45ab..3d4326f 100644
+--- a/src/pages/dashboard/components/AdminVouchersDrawer.tsx
++++ b/src/pages/dashboard/components/AdminVouchersDrawer.tsx
+@@ -1,5 +1,5 @@
+ import { ArrowRightIcon, ReceiptIcon } from "lucide-react"
+-import { useMemo, useState } from "react"
++import { useState } from "react"
+ import { useNavigate } from "react-router-dom"
+ 
+ import { AnimatedNumber } from "@/components/AnimatedNumber"
+@@ -56,28 +56,25 @@ export function AdminVouchersDrawer({
+     }
+   }
+ 
+-  const { data, isLoading } = useAllVouchersQuery(
++  const { data, isLoading, fetchNextPage, isFetchingNextPage } = useAllVouchersQuery(
+     {
+-      limit: 100,
++      limit: pageSize,
++      status: "awaiting_admin",
+       order: sortOrder === "Recientes" ? "desc" : "asc",
+     },
+     { enabled: open }
+   )
+ 
+-  const vouchers = useMemo(() => {
+-    if (!data) return []
+-    const all = data.pages.flatMap((p) => p.vouchers)
+-    return all.sort((a, b) => {
+-      const dateA = new Date(a.createdAt || a.operationDate || 0).getTime()
+-      const dateB = new Date(b.createdAt || b.operationDate || 0).getTime()
+-      return sortOrder === "Recientes" ? dateB - dateA : dateA - dateB
+-    })
+-  }, [data, sortOrder])
+-
+-  const totalPages = Math.max(1, Math.ceil(vouchers.length / pageSize))
+-  const paginatedVouchers = useMemo(() => {
+-    return vouchers.slice((page - 1) * pageSize, page * pageSize)
+-  }, [vouchers, page])
++  const paginatedVouchers = data?.pages[page - 1]?.vouchers ?? []
++  const totalPages = data?.pages[0]?.meta.totalPages ?? 1
++  async function nextPage() {
++    if (page >= totalPages || isFetchingNextPage) return
++    if (!data?.pages[page]) {
++      const result = await fetchNextPage()
++      if (result.isError) return
++    }
++    setPage(page + 1)
++  }
+ 
+   const handleVoucherClick = (loanId?: string) => {
+     if (!loanId) return
+@@ -98,7 +95,7 @@ export function AdminVouchersDrawer({
+             Revisar Vouchers
+           </DrawerTitle>
+           <DrawerDescription>
+-            Lista de vouchers emitidos pendientes de revisión o historial general.
++            Comprobantes pendientes de revisión administrativa.
+           </DrawerDescription>
+         </DrawerHeader>
+ 
+@@ -126,7 +123,7 @@ export function AdminVouchersDrawer({
+             <div className="flex justify-center py-8">
+               <Spinner />
+             </div>
+-          ) : vouchers.length === 0 ? (
++          ) : paginatedVouchers.length === 0 ? (
+             <div className="text-center text-muted-foreground py-8 text-sm">
+               No hay vouchers pendientes por revisar.
+             </div>
+@@ -170,7 +167,7 @@ export function AdminVouchersDrawer({
+                       </PaginationItem>
+                       <PaginationItem>
+                         <PaginationNext
+-                          onClick={() => setPage((p) => Math.min(totalPages, p + 1))}
++                          onClick={() => void nextPage()}
+                           className={page === totalPages ? "pointer-events-none opacity-50" : "cursor-pointer"}
+                         />
+                       </PaginationItem>
+diff --git a/src/pages/dashboard/dashboard-queries.ts b/src/pages/dashboard/dashboard-queries.ts
+index 2ff9e6d..760009c 100644
+--- a/src/pages/dashboard/dashboard-queries.ts
++++ b/src/pages/dashboard/dashboard-queries.ts
+@@ -79,6 +79,7 @@ export type InvestorPortfolio = {
+   summary?: {
+     activeLoans?: number;
+     collectedAmount?: number | string;
++    overdueLoans?: number;
+     totalInvested?: string;
+     totalReturn?: string;
+   };
+diff --git a/vite.config.ts b/vite.config.ts
+index 29cce90..c170edd 100644
+--- a/vite.config.ts
++++ b/vite.config.ts
+@@ -12,6 +12,18 @@ export default defineConfig({
+     babel({ presets: [reactCompilerPreset()] }),
+     tailwindcss(),
+   ],
++  build: {
++    rolldownOptions: {
++      output: {
++        codeSplitting: {
++          groups: [
++            { name: "react-runtime", test: /[\\/]node_modules[\\/](?:react|react-dom|scheduler)[\\/]/ },
++            { name: "motion", test: /[\\/]node_modules[\\/](?:framer-motion|motion-dom|motion-utils)[\\/]/ },
++          ],
++        },
++      },
++    },
++  },
+   server: {
+     host: host || false,
+     port: 5173,
+-- 
+2.49.0.windows.1
+
